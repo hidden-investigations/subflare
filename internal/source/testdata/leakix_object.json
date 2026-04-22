@@ -1,0 +1,4 @@
+[
+  {"subdomain": "api.example.com"},
+  {"subdomain": "dev.example.com"}
+]

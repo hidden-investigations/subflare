@@ -1,0 +1,4 @@
+[
+  {"dns_names": ["api.example.com", "dev.example.com", "*.wild.example.com"]},
+  {"dns_names": ["staging.example.com"]}
+]

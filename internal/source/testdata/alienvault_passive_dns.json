@@ -1,0 +1,6 @@
+{
+  "passive_dns": [
+    {"hostname": "a.example.com"},
+    {"hostname": "b.example.com"}
+  ]
+}
