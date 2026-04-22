@@ -46,6 +46,14 @@ func New(servers []string, timeout time.Duration, retries int) *Resolver {
 	}
 }
 
+func (r *Resolver) Servers() []string {
+	out := make([]string, 0, len(r.servers))
+	for _, server := range r.servers {
+		out = append(out, server)
+	}
+	return out
+}
+
 func (r *Resolver) QueryA(ctx context.Context, host string) ([]string, []string, error) {
 	if len(r.servers) == 0 {
 		return nil, nil, errors.New("no resolvers configured")
@@ -73,6 +81,43 @@ func (r *Resolver) QueryA(ctx context.Context, host string) ([]string, []string,
 		lastErr = errors.New("lookup failed")
 	}
 	return nil, nil, lastErr
+}
+
+func (r *Resolver) QueryPTR(ctx context.Context, ip string) ([]string, error) {
+	if len(r.servers) == 0 {
+		return nil, errors.New("no resolvers configured")
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return nil, errors.New("empty ip")
+	}
+
+	ptr, err := dns.ReverseAddr(ip)
+	if err != nil {
+		return nil, err
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < r.retries; attempt++ {
+		server := r.pickResolver()
+		queryCtx, cancel := context.WithTimeout(ctx, r.timeout)
+		hosts, qErr := r.queryPTROnce(queryCtx, ptr, server)
+		cancel()
+		if qErr == nil {
+			r.markSuccess(server)
+			return util.UniqueSorted(hosts), nil
+		}
+		r.markFailure(server)
+		lastErr = qErr
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("ptr lookup failed")
+	}
+	return nil, lastErr
 }
 
 func (r *Resolver) queryOnce(ctx context.Context, host, server string) ([]string, []string, error) {
@@ -118,6 +163,44 @@ func (r *Resolver) queryOnce(ctx context.Context, host, server string) ([]string
 		return nil, nil, errors.New("no a/cname answers")
 	}
 	return ips, cnames, nil
+}
+
+func (r *Resolver) queryPTROnce(ctx context.Context, ptr, server string) ([]string, error) {
+	message := new(dns.Msg)
+	message.SetQuestion(dns.Fqdn(ptr), dns.TypePTR)
+
+	udpClient := &dns.Client{Net: "udp"}
+	response, _, err := udpClient.ExchangeContext(ctx, message, server)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, errors.New("empty dns response")
+	}
+	if response.Truncated {
+		tcpClient := &dns.Client{Net: "tcp"}
+		response, _, err = tcpClient.ExchangeContext(ctx, message, server)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if response.Rcode != dns.RcodeSuccess {
+		return nil, fmt.Errorf("dns rcode=%s", dns.RcodeToString[response.Rcode])
+	}
+
+	hosts := []string{}
+	for _, answer := range response.Answer {
+		if rr, ok := answer.(*dns.PTR); ok {
+			host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rr.Ptr)), ".")
+			if host != "" {
+				hosts = append(hosts, host)
+			}
+		}
+	}
+	if len(hosts) == 0 {
+		return nil, errors.New("no ptr answers")
+	}
+	return hosts, nil
 }
 
 func (r *Resolver) pickResolver() string {

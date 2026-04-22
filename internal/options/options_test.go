@@ -120,3 +120,64 @@ func TestParseCacheFlags(t *testing.T) {
 		t.Fatal("expected no-cache to be true")
 	}
 }
+
+func TestParsePhase3Flags(t *testing.T) {
+	opts, err := parseForTest(
+		"-d", "example.com",
+		"--bruteforce-depth", "2",
+		"--bruteforce-max", "15000",
+		"--permutation",
+		"--permutation-depth", "2",
+		"--permutation-max", "4000",
+		"--dns-backend", "massdns",
+		"--massdns-path", "/usr/bin/massdns",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.BruteforceDepth != 2 || opts.BruteforceMax != 15000 {
+		t.Fatalf("unexpected bruteforce controls: depth=%d max=%d", opts.BruteforceDepth, opts.BruteforceMax)
+	}
+	if !opts.Permutation || opts.PermutationDepth != 2 || opts.PermutationMax != 4000 {
+		t.Fatalf("unexpected permutation controls: enabled=%v depth=%d max=%d", opts.Permutation, opts.PermutationDepth, opts.PermutationMax)
+	}
+	if opts.DNSBackend != "massdns" {
+		t.Fatalf("unexpected dns-backend: %s", opts.DNSBackend)
+	}
+	if opts.MassDNSPath != "/usr/bin/massdns" {
+		t.Fatalf("unexpected massdns-path: %s", opts.MassDNSPath)
+	}
+}
+
+func TestParseInvalidDNSBackend(t *testing.T) {
+	_, err := parseForTest("-d", "example.com", "--dns-backend", "invalid")
+	if err == nil {
+		t.Fatal("expected invalid dns-backend error")
+	}
+}
+
+func TestParsePhase5Flags(t *testing.T) {
+	opts, err := parseForTest(
+		"-d", "example.com",
+		"--rdns-expand",
+		"--rdns-limit", "300",
+		"--http-probe",
+		"--http-probe-timeout", "7s",
+		"--http-probe-threads", "25",
+		"--takeover-check",
+		"--takeover-threads", "12",
+		"--takeover-timeout", "4s",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !opts.RDNSExpand || opts.RDNSLimit != 300 {
+		t.Fatalf("unexpected rdns flags: enabled=%v limit=%d", opts.RDNSExpand, opts.RDNSLimit)
+	}
+	if !opts.HTTPProbe || opts.HTTPProbeThreads != 25 || opts.HTTPProbeTimeout != 7*time.Second {
+		t.Fatalf("unexpected http probe flags: enabled=%v threads=%d timeout=%s", opts.HTTPProbe, opts.HTTPProbeThreads, opts.HTTPProbeTimeout)
+	}
+	if !opts.TakeoverCheck || opts.TakeoverThreads != 12 || opts.TakeoverTimeout != 4*time.Second {
+		t.Fatalf("unexpected takeover flags: enabled=%v threads=%d timeout=%s", opts.TakeoverCheck, opts.TakeoverThreads, opts.TakeoverTimeout)
+	}
+}

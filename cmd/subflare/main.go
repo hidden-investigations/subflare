@@ -129,14 +129,10 @@ func runScan(ctx context.Context, opts options.Options) error {
 				fmt.Fprintf(os.Stderr, "[INF] target domain: %s\n", domain)
 			}
 			printScanSummary(domain, report.Stats, time.Since(startedAt), opts.Verbose)
-			fmt.Fprintf(os.Stderr, "[INF] results (%d):\n", len(report.Results))
+			printResultSection(len(report.Results))
 		}
 
-		if !opts.Silent {
-			// Keep a visible gap before host lines for easier copy/paste.
-			fmt.Fprintln(os.Stderr)
-		}
-		if !opts.Silent && idx > 0 {
+		if !opts.Silent && idx > 0 && len(report.Results) > 0 {
 			fmt.Println()
 		}
 
@@ -147,6 +143,10 @@ func runScan(ctx context.Context, opts options.Options) error {
 				fmt.Println(result.Host)
 			}
 			allResults = append(allResults, result)
+		}
+
+		if opts.TakeoverCheck && !opts.Silent {
+			printTakeoverAssessment(report.Results)
 		}
 	}
 
@@ -387,27 +387,43 @@ func stripGlobalFlags(args []string) []string {
 }
 
 func printScanSummary(domain string, stats pipeline.Stats, duration time.Duration, verbose bool) {
-	fmt.Fprintln(os.Stderr, "[INF] scan summary")
-	fmt.Fprintf(os.Stderr, "[INF] domain: %s\n", domain)
-	fmt.Fprintf(os.Stderr, "[INF] elapsed: %s\n", formatDuration(duration))
+	printInfoSection("scan summary")
+	printInfoKV("domain", domain)
+	printInfoKV("elapsed", formatDuration(duration))
+	if stats.DNSBackend != "" {
+		printInfoKV("dns backend", stats.DNSBackend)
+	}
 	if stats.PassiveSources > 0 {
-		fmt.Fprintf(os.Stderr, "[INF] passive sources: total=%d, succeeded=%d, failed=%d, cache_hits=%d\n", stats.PassiveSources, stats.PassiveSucceeded, stats.PassiveFailed, stats.PassiveCacheHits)
-		fmt.Fprintf(os.Stderr, "[INF] sources with findings: %d\n", countPositiveSources(stats.SourceCounts))
+		printInfoKV("passive sources", fmt.Sprintf("total=%d, succeeded=%d, failed=%d, cache_hits=%d", stats.PassiveSources, stats.PassiveSucceeded, stats.PassiveFailed, stats.PassiveCacheHits))
+		printInfoKV("sources with findings", fmt.Sprintf("%d", countPositiveSources(stats.SourceCounts)))
 		printTopSourceYields(stats.SourceCounts, stats.SourceCacheHits, 8)
 	}
-	fmt.Fprintf(os.Stderr, "[INF] bruteforce seeded: %d\n", stats.BruteforceSeeded)
-	fmt.Fprintf(os.Stderr, "[INF] passive discovered: %d\n", stats.PassiveDiscovered)
-	fmt.Fprintf(os.Stderr, "[INF] unique candidates: %d\n", stats.CandidateTotal)
-	fmt.Fprintf(os.Stderr, "[INF] resolved: %d, failed: %d\n", stats.ResolvedFast, stats.FailedFast)
-	fmt.Fprintf(os.Stderr, "[INF] wildcard dropped: %d\n", stats.WildcardDropped)
-	fmt.Fprintf(os.Stderr, "[INF] trusted validation dropped: %d\n", stats.TrustedDropped)
-	fmt.Fprintf(os.Stderr, "[INF] final subdomains: %d\n", stats.FinalTotal)
+	printInfoKV("bruteforce seeded", fmt.Sprintf("%d", stats.BruteforceSeeded))
+	if stats.PermutationSeeded > 0 {
+		printInfoKV("permutation seeded", fmt.Sprintf("%d", stats.PermutationSeeded))
+	}
+	printInfoKV("passive discovered", fmt.Sprintf("%d", stats.PassiveDiscovered))
+	printInfoKV("unique candidates", fmt.Sprintf("%d", stats.CandidateTotal))
+	printInfoKV("resolved", fmt.Sprintf("%d, failed: %d", stats.ResolvedFast, stats.FailedFast))
+	if stats.RDNSSeeded > 0 || stats.RDNSResolved > 0 {
+		printInfoKV("reverse-dns expansion", fmt.Sprintf("seeded=%d, resolved=%d", stats.RDNSSeeded, stats.RDNSResolved))
+	}
+	printInfoKV("wildcard dropped", fmt.Sprintf("%d", stats.WildcardDropped))
+	printInfoKV("trusted validation dropped", fmt.Sprintf("%d", stats.TrustedDropped))
+	if stats.HTTPProbeEnabled {
+		printInfoKV("http probed", fmt.Sprintf("%d", stats.HTTPProbed))
+	}
+	if stats.TakeoverEnabled {
+		printInfoKV("takeover checked", fmt.Sprintf("%d", stats.TakeoverChecked))
+		printInfoKV("takeover signals", fmt.Sprintf("%d", stats.TakeoverSignals))
+	}
+	printInfoKV("final subdomains", fmt.Sprintf("%d", stats.FinalTotal))
 
 	if len(stats.SourceErrors) == 0 {
 		return
 	}
 	if !verbose {
-		fmt.Fprintf(os.Stderr, "[INF] source warnings: %d (use --verbose for details)\n", len(stats.SourceErrors))
+		printInfoKV("source warnings", fmt.Sprintf("%d (use --verbose for details)", len(stats.SourceErrors)))
 		return
 	}
 
@@ -492,5 +508,77 @@ func printSources(names []string) {
 func printList(items []string) {
 	for _, item := range items {
 		fmt.Println(item)
+	}
+}
+
+func printResultSection(total int) {
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "[INF] subdomain results")
+	printInfoKV("total", fmt.Sprintf("%d", total))
+	fmt.Fprintln(os.Stderr)
+	if total == 0 {
+		fmt.Fprintln(os.Stderr, "[INF] no subdomains found")
+	}
+}
+
+func printInfoSection(title string) {
+	fmt.Fprintln(os.Stderr, "[INF] "+title)
+}
+
+func printInfoKV(key, value string) {
+	fmt.Fprintf(os.Stderr, "[INF] %-26s %s\n", key+":", value)
+}
+
+type takeoverFinding struct {
+	Host     string
+	Provider string
+	Reason   string
+}
+
+func collectTakeoverFindings(results []model.Result) []takeoverFinding {
+	findings := make([]takeoverFinding, 0)
+	seen := map[string]struct{}{}
+	for _, result := range results {
+		if !result.TakeoverPotential {
+			continue
+		}
+		host := strings.TrimSpace(result.Host)
+		if host == "" {
+			continue
+		}
+		if _, exists := seen[host]; exists {
+			continue
+		}
+		seen[host] = struct{}{}
+		findings = append(findings, takeoverFinding{
+			Host:     host,
+			Provider: strings.TrimSpace(result.TakeoverProvider),
+			Reason:   strings.TrimSpace(result.TakeoverReason),
+		})
+	}
+	sort.Slice(findings, func(i, j int) bool { return findings[i].Host < findings[j].Host })
+	return findings
+}
+
+func printTakeoverAssessment(results []model.Result) {
+	findings := collectTakeoverFindings(results)
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "[INF] takeover assessment")
+	if len(findings) == 0 {
+		fmt.Fprintln(os.Stderr, "[INF] no luck: no takeover possibility detected")
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[INF] possible takeover targets (%d):\n", len(findings))
+	for _, finding := range findings {
+		provider := finding.Provider
+		if provider == "" {
+			provider = "unknown-provider"
+		}
+		reason := finding.Reason
+		if reason == "" {
+			reason = "signal matched"
+		}
+		fmt.Fprintf(os.Stderr, "[TAKEOVER] %s | provider=%s | reason=%s\n", finding.Host, provider, reason)
 	}
 }

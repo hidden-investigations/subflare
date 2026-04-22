@@ -42,8 +42,14 @@ By using this project, you agree to follow all applicable laws and regulations.
 - ⚡ **High-speed passive recon** across 25 integrated sources
 - 🧠 **Source runtime controls**: retries, backoff, rate limits, per-source timeout
 - 🗂️ **Passive cache layer** for faster repeated runs
+- 🔁 **Recursive bruteforce + smart permutations** for deeper host expansion
 - 🌐 **DNS validation pipeline** with resolver health scoring
+- 🚀 **Pluggable DNS backend** (`standard` or `massdns`)
+- 🔎 **Reverse DNS expansion** to discover additional in-scope hosts
 - 🧹 **Wildcard filtering** + trusted-resolver revalidation
+- 🌍 **HTTP probe handoff** (status, title, basic technology hints)
+- 🛡️ **Takeover signal checks** (fingerprint-based CNAME/service validation)
+- 🧾 **Production-friendly CLI UX** with structured summary, result, and takeover sections
 - 📊 **Readable scan summary** for operator workflow
 - 🤖 **Automation mode** with strict stdout-only output
 - 🧪 Workflow commands:
@@ -94,7 +100,7 @@ go build -o subflare ./cmd/subflare
 3. Verify:
 
 ```bash
-./subflare --help
+subflare --help
 ```
 
 ---
@@ -104,19 +110,19 @@ go build -o subflare ./cmd/subflare
 Basic run:
 
 ```bash
-./subflare -d example.com
+subflare -d example.com
 ```
 
 With selected sources:
 
 ```bash
-./subflare -d example.com --sources crtsh,anubis,securitytrails
+subflare -d example.com --sources crtsh,anubis,securitytrails
 ```
 
 Automation-safe output:
 
 ```bash
-cat domains.txt | ./subflare --stdin --strict-io --no-banner
+cat domains.txt | subflare --stdin --strict-io --no-banner
 ```
 
 ---
@@ -142,6 +148,11 @@ cat domains.txt | ./subflare --stdin --strict-io --no-banner
 | `--passive` | Enable passive collection | `true` |
 | `--bruteforce` | Enable bruteforce mode | `false` |
 | `-w`, `--wordlist` | Bruteforce wordlist path | none |
+| `--bruteforce-depth` | Recursive bruteforce label depth | `1` |
+| `--bruteforce-max` | Max bruteforce candidates | `10000` |
+| `--permutation` | Enable smart permutation expansion | `false` |
+| `--permutation-depth` | Permutation recursion depth | `1` |
+| `--permutation-max` | Max permutation candidates | `5000` |
 | `-s`, `--sources` | Comma-separated source list | all |
 | `-es`, `--exclude-sources` | Exclude source list | none |
 | `--list-sources` | Print passive sources and exit | off |
@@ -170,9 +181,24 @@ cat domains.txt | ./subflare --stdin --strict-io --no-banner
 | `-r`, `--resolvers` | Fast resolver list/file | built-in |
 | `-tr`, `--trusted-resolvers` | Trusted resolver list/file | built-in |
 | `-t`, `--threads` | DNS worker concurrency | `200` |
+| `--dns-backend` | DNS backend (`standard` or `massdns`) | `standard` |
+| `--massdns-path` | Path to massdns binary | `massdns` |
+| `--rdns-expand` | Expand via reverse DNS of resolved IPs | `false` |
+| `--rdns-limit` | Max reverse-DNS expansion candidates | `1000` |
 | `--timeout` | Per-query DNS timeout | `3s` |
 | `--retries` | DNS retries per host | `2` |
 | `--wildcard-tests` | Random suffix checks for wildcard detect | `2` |
+
+### Enrichment & takeover options
+
+| Option | Description | Default |
+|-------|-------------|---------|
+| `--http-probe` | Probe validated hosts over HTTP/HTTPS | `false` |
+| `--http-probe-timeout` | Timeout for HTTP probe requests | `5s` |
+| `--http-probe-threads` | Concurrency for HTTP probing | `50` |
+| `--takeover-check` | Run takeover signal checks | `false` |
+| `--takeover-threads` | Concurrency for takeover checks | `25` |
+| `--takeover-timeout` | Timeout for takeover checks | `5s` |
 
 ### Output & automation options
 
@@ -245,7 +271,7 @@ Default provider file path:
 Custom path:
 
 ```bash
-./subflare -d example.com --provider-config /path/to/providers.env
+subflare -d example.com --provider-config /path/to/providers.env
 ```
 
 Example:
@@ -276,35 +302,90 @@ ALIENVAULT_API_KEY=...
 Basic scan:
 
 ```bash
-./subflare -d hiddeninvestigations.net
+subflare -d hiddeninvestigations.net
+```
+
+Bruteforce + permutation depth tuning:
+
+```bash
+subflare -d hiddeninvestigations.net \
+  --bruteforce -w words.txt \
+  --bruteforce-depth 2 --bruteforce-max 20000 \
+  --permutation --permutation-depth 2 --permutation-max 5000
+```
+
+MassDNS backend:
+
+```bash
+subflare -d hiddeninvestigations.net --dns-backend massdns --massdns-path /usr/bin/massdns
+```
+
+Reverse-DNS + HTTP probe + takeover checks:
+
+```bash
+subflare -d hiddeninvestigations.net --rdns-expand --http-probe --takeover-check
 ```
 
 Save text + JSONL:
 
 ```bash
-./subflare -d hiddeninvestigations.net -o results.txt --jsonl results.jsonl
+subflare -d hiddeninvestigations.net -o results.txt --jsonl results.jsonl
 ```
 
 Show detailed source errors:
 
 ```bash
-./subflare -d hiddeninvestigations.net --verbose
+subflare -d hiddeninvestigations.net --verbose
 ```
 
 Diff old and new runs:
 
 ```bash
-./subflare diff --old old.txt --new new.txt --show all
+subflare diff --old old.txt --new new.txt --show all
 ```
 
 Monitor with Discord alerts:
 
 ```bash
-./subflare monitor -d hiddeninvestigations.net \
+subflare monitor -d hiddeninvestigations.net \
   --monitor-interval 30m \
   --state-dir /tmp/subflare-state \
   --webhook-discord 'https://discord.com/api/webhooks/...'
 ```
+
+---
+
+## Takeover Check Behavior
+
+`--takeover-check` performs **signal-based takeover checks** on validated hosts:
+
+- Matches known CNAME provider fingerprints.
+- Flags dangling CNAME targets only when DNS errors indicate hard non-existence (for example NXDOMAIN / no such host).
+- Applies provider-aware HTTP fingerprint checks using response status + content indicators.
+
+Current built-in provider rules include:
+
+- GitHub Pages
+- Heroku
+- ReadTheDocs
+- Pantheon
+- AWS S3 website/bucket endpoints
+- Azure App Service
+- Vercel
+- Surge
+
+Scan summary now reports:
+
+- `takeover checked`: how many hosts were evaluated for takeover signals.
+- `takeover signals`: how many hosts matched takeover indicators.
+
+When `--takeover-check` is enabled, terminal output also prints a dedicated **Takeover Assessment** section:
+
+- Lists only hosts with takeover possibility signals (`[TAKEOVER] ...`)
+- Prints a clear no-findings message (`no luck`) when no takeover possibility is detected
+- Does not change the normal subdomain host result output format
+
+This output is a **high-value triage signal**, not a final vulnerability verdict. Always manually verify takeover candidates before reporting.
 
 ---
 

@@ -24,6 +24,11 @@ type Options struct {
 	Passive          bool
 	Bruteforce       bool
 	Wordlist         string
+	BruteforceDepth  int
+	BruteforceMax    int
+	Permutation      bool
+	PermutationDepth int
+	PermutationMax   int
 	Sources          []string
 	ExcludeSources   []string
 	ListSources      bool
@@ -53,6 +58,16 @@ type Options struct {
 	Resolvers        []string
 	TrustedResolvers []string
 	Threads          int
+	DNSBackend       string
+	MassDNSPath      string
+	RDNSExpand       bool
+	RDNSLimit        int
+	HTTPProbe        bool
+	HTTPProbeTimeout time.Duration
+	HTTPProbeThreads int
+	TakeoverCheck    bool
+	TakeoverThreads  int
+	TakeoverTimeout  time.Duration
 	Timeout          time.Duration
 	Retries          int
 	HTTPTimeout      time.Duration
@@ -79,6 +94,11 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 	fs.BoolVar(&opts.Bruteforce, "bruteforce", false, "enable wordlist bruteforce")
 	fs.StringVar(&opts.Wordlist, "wordlist", "", "wordlist file path for bruteforce")
 	fs.StringVar(&opts.Wordlist, "w", "", "wordlist file path for bruteforce")
+	fs.IntVar(&opts.BruteforceDepth, "bruteforce-depth", 1, "recursive bruteforce label depth")
+	fs.IntVar(&opts.BruteforceMax, "bruteforce-max", 10000, "max bruteforce candidates to generate")
+	fs.BoolVar(&opts.Permutation, "permutation", false, "enable smart permutation generation")
+	fs.IntVar(&opts.PermutationDepth, "permutation-depth", 1, "permutation recursion depth")
+	fs.IntVar(&opts.PermutationMax, "permutation-max", 5000, "max permutation candidates to generate")
 	fs.StringVar(&sourcesInput, "sources", "", "comma-separated passive source names")
 	fs.StringVar(&sourcesInput, "s", "", "comma-separated passive source names")
 	fs.StringVar(&excludeSourcesInput, "exclude-sources", "", "comma-separated passive sources to exclude")
@@ -114,6 +134,16 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 	fs.StringVar(&trustedInput, "tr", "", "comma-separated trusted resolvers or file path")
 	fs.IntVar(&opts.Threads, "threads", 200, "number of concurrent DNS workers")
 	fs.IntVar(&opts.Threads, "t", 200, "number of concurrent DNS workers")
+	fs.StringVar(&opts.DNSBackend, "dns-backend", "standard", "dns resolution backend: standard|massdns")
+	fs.StringVar(&opts.MassDNSPath, "massdns-path", "massdns", "massdns binary path when --dns-backend massdns")
+	fs.BoolVar(&opts.RDNSExpand, "rdns-expand", false, "expand candidates from reverse DNS of resolved IPs")
+	fs.IntVar(&opts.RDNSLimit, "rdns-limit", 1000, "max candidates added by reverse DNS expansion")
+	fs.BoolVar(&opts.HTTPProbe, "http-probe", false, "probe final hosts over HTTP/HTTPS for status/title/tech")
+	fs.DurationVar(&opts.HTTPProbeTimeout, "http-probe-timeout", 5*time.Second, "timeout for HTTP probe requests")
+	fs.IntVar(&opts.HTTPProbeThreads, "http-probe-threads", 50, "concurrency for HTTP probing")
+	fs.BoolVar(&opts.TakeoverCheck, "takeover-check", false, "run CNAME takeover signal checks")
+	fs.IntVar(&opts.TakeoverThreads, "takeover-threads", 25, "concurrency for takeover checks")
+	fs.DurationVar(&opts.TakeoverTimeout, "takeover-timeout", 5*time.Second, "timeout for takeover checks")
 	fs.DurationVar(&opts.Timeout, "timeout", 3*time.Second, "per-request DNS timeout")
 	fs.IntVar(&opts.Retries, "retries", 2, "DNS retries per host")
 	fs.DurationVar(&opts.HTTPTimeout, "http-timeout", 25*time.Second, "http client timeout for passive sources")
@@ -153,8 +183,35 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 	if opts.Threads < 1 {
 		return opts, errors.New("threads must be > 0")
 	}
+	if opts.BruteforceDepth < 1 {
+		return opts, errors.New("bruteforce-depth must be > 0")
+	}
+	if opts.BruteforceMax < 1 {
+		return opts, errors.New("bruteforce-max must be > 0")
+	}
+	if opts.PermutationDepth < 1 {
+		return opts, errors.New("permutation-depth must be > 0")
+	}
+	if opts.PermutationMax < 1 {
+		return opts, errors.New("permutation-max must be > 0")
+	}
 	if opts.Retries < 1 {
 		return opts, errors.New("retries must be > 0")
+	}
+	if opts.RDNSLimit < 1 {
+		return opts, errors.New("rdns-limit must be > 0")
+	}
+	if opts.HTTPProbeThreads < 1 {
+		return opts, errors.New("http-probe-threads must be > 0")
+	}
+	if opts.TakeoverThreads < 1 {
+		return opts, errors.New("takeover-threads must be > 0")
+	}
+	if opts.HTTPProbeTimeout <= 0 {
+		return opts, errors.New("http-probe-timeout must be > 0")
+	}
+	if opts.TakeoverTimeout <= 0 {
+		return opts, errors.New("takeover-timeout must be > 0")
 	}
 	if opts.WildcardTests < 1 {
 		return opts, errors.New("wildcard-tests must be > 0")
@@ -185,6 +242,13 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 	}
 	if opts.RateLimit < 0 {
 		return opts, errors.New("rate-limit cannot be negative")
+	}
+	opts.DNSBackend = strings.TrimSpace(strings.ToLower(opts.DNSBackend))
+	if opts.DNSBackend != "standard" && opts.DNSBackend != "massdns" {
+		return opts, errors.New("dns-backend must be one of: standard,massdns")
+	}
+	if strings.TrimSpace(opts.MassDNSPath) == "" {
+		return opts, errors.New("massdns-path cannot be empty")
 	}
 
 	if opts.Wordlist != "" {
@@ -240,6 +304,11 @@ func PrintHelp(w io.Writer, sourceNames []string) {
 	fmt.Fprintln(w, "  --passive                   enable passive source enumeration (default: true)")
 	fmt.Fprintln(w, "  --bruteforce                enable wordlist bruteforce")
 	fmt.Fprintln(w, "  -w, --wordlist string       wordlist file path for bruteforce")
+	fmt.Fprintln(w, "  --bruteforce-depth int      recursive bruteforce label depth")
+	fmt.Fprintln(w, "  --bruteforce-max int        max bruteforce candidates")
+	fmt.Fprintln(w, "  --permutation               enable smart permutations")
+	fmt.Fprintln(w, "  --permutation-depth int     permutation recursion depth")
+	fmt.Fprintln(w, "  --permutation-max int       max permutation candidates")
 	fmt.Fprintln(w, "  -s, --sources string        comma-separated passive sources to run")
 	fmt.Fprintln(w, "  -es, --exclude-sources      comma-separated passive sources to skip")
 	fmt.Fprintln(w, "  --list-sources              list all passive sources and exit")
@@ -275,9 +344,19 @@ func PrintHelp(w io.Writer, sourceNames []string) {
 	fmt.Fprintln(w, "  -r, --resolvers string      resolvers file path or comma-separated resolvers")
 	fmt.Fprintln(w, "  -tr, --trusted-resolvers    trusted resolvers file path or comma-separated resolvers")
 	fmt.Fprintln(w, "  -t, --threads int           concurrent DNS workers (default: 200)")
+	fmt.Fprintln(w, "  --dns-backend string        dns backend: standard|massdns")
+	fmt.Fprintln(w, "  --massdns-path string       massdns binary path")
+	fmt.Fprintln(w, "  --rdns-expand               reverse-dns expansion mode")
+	fmt.Fprintln(w, "  --rdns-limit int            max rdns expansion candidates")
 	fmt.Fprintln(w, "  --timeout duration          per-request DNS timeout (default: 3s)")
 	fmt.Fprintln(w, "  --retries int               DNS retries per host (default: 2)")
 	fmt.Fprintln(w, "  --wildcard-tests int        random checks per suffix (default: 2)")
+	fmt.Fprintln(w, "  --http-probe                http probing handoff mode")
+	fmt.Fprintln(w, "  --http-probe-timeout        timeout for http probing")
+	fmt.Fprintln(w, "  --http-probe-threads int    http probe concurrency")
+	fmt.Fprintln(w, "  --takeover-check            cname takeover signal checks")
+	fmt.Fprintln(w, "  --takeover-threads int      takeover check concurrency")
+	fmt.Fprintln(w, "  --takeover-timeout          timeout for takeover checks")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Output Flags:")
 	fmt.Fprintln(w, "  -o, --output string         save subdomains as text")
@@ -288,6 +367,10 @@ func PrintHelp(w io.Writer, sourceNames []string) {
 	fmt.Fprintln(w, "Examples:")
 	fmt.Fprintln(w, "  subflare -d example.com")
 	fmt.Fprintln(w, "  subflare -d example.com --sources crtsh,anubis,rapiddns")
+	fmt.Fprintln(w, "  subflare -d example.com --bruteforce -w words.txt --bruteforce-depth 2 --bruteforce-max 20000")
+	fmt.Fprintln(w, "  subflare -d example.com --permutation --permutation-depth 2 --permutation-max 5000")
+	fmt.Fprintln(w, "  subflare -d example.com --dns-backend massdns --massdns-path /usr/bin/massdns")
+	fmt.Fprintln(w, "  subflare -d example.com --rdns-expand --http-probe --takeover-check")
 	fmt.Fprintln(w, "  subflare -d example.com -es shodan --rls 'crtsh=5/s,rapiddns=2/s'")
 	fmt.Fprintln(w, "  subflare -d example.com --provider-config ~/.config/subflare/providers.env")
 	fmt.Fprintln(w, "  subflare -d example.com --silent --no-banner -o results.txt --jsonl results.jsonl")
