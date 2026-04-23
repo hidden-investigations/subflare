@@ -49,6 +49,7 @@ By using this project, you agree to follow all applicable laws and regulations.
 - 🧹 **Wildcard filtering** + trusted-resolver revalidation
 - 🌍 **HTTP probe handoff** (status, title, basic technology hints)
 - 🛡️ **Takeover signal checks** (fingerprint-based CNAME/service validation)
+- 🎯 **Takeover-only mode** for checking existing subdomain lists (`--takeover`)
 - 🧾 **Production-friendly CLI UX** with structured summary, result, and takeover sections
 - 📊 **Readable scan summary** for operator workflow
 - 🤖 **Automation mode** with strict stdout-only output
@@ -144,7 +145,9 @@ cat domains.txt | subflare --stdin --strict-io --no-banner
 
 | Option | Description | Default |
 |-------|-------------|---------|
-| `-d`, `--domain` | Target root domain | required (unless `--stdin`) |
+| `-d`, `--domain` | Target root domain | required unless `--stdin`, `-l`, or `--takeover` |
+| `-l`, `--list` | Input list file (domains/subdomains) | none |
+| `--takeover` | Run takeover-only mode on provided hosts | `false` |
 | `--passive` | Enable passive collection | `true` |
 | `--bruteforce` | Enable bruteforce mode | `false` |
 | `-w`, `--wordlist` | Bruteforce wordlist path | none |
@@ -193,6 +196,8 @@ cat domains.txt | subflare --stdin --strict-io --no-banner
 
 | Option | Description | Default |
 |-------|-------------|---------|
+| `--takeover` | Run takeover-only mode on provided hosts | `false` |
+| `-l`, `--list` | Input list file for takeover-only target hosts | none |
 | `--http-probe` | Probe validated hosts over HTTP/HTTPS | `false` |
 | `--http-probe-timeout` | Timeout for HTTP probe requests | `5s` |
 | `--http-probe-threads` | Concurrency for HTTP probing | `50` |
@@ -326,6 +331,24 @@ Reverse-DNS + HTTP probe + takeover checks:
 subflare -d hiddeninvestigations.net --rdns-expand --http-probe --takeover-check
 ```
 
+Takeover-only from file:
+
+```bash
+subflare --takeover -l subs.txt
+```
+
+Takeover-only from stdin:
+
+```bash
+cat sub.txt | subflare --takeover
+```
+
+Combine list file + stdin in automation mode:
+
+```bash
+subflare --stdin --strict-io --no-banner -l domain.txt
+```
+
 Save text + JSONL:
 
 ```bash
@@ -386,6 +409,10 @@ When `--takeover-check` is enabled, terminal output also prints a dedicated **Ta
 - Does not change the normal subdomain host result output format
 
 This output is a **high-value triage signal**, not a final vulnerability verdict. Always manually verify takeover candidates before reporting.
+
+`--takeover` runs takeover checks directly on provided host lists (`-l`, `--stdin`, or piped stdin) without running passive/bruteforce discovery.
+
+With `--takeover --strict-io`, stdout contains only takeover-positive hosts.
 
 ---
 

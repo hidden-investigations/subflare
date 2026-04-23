@@ -15,11 +15,15 @@ import (
 	"time"
 
 	"github.com/hidden-investigations/subflare/internal/bench"
+	"github.com/hidden-investigations/subflare/internal/dnsresolve"
+	"github.com/hidden-investigations/subflare/internal/httpprobe"
 	"github.com/hidden-investigations/subflare/internal/model"
 	"github.com/hidden-investigations/subflare/internal/options"
 	"github.com/hidden-investigations/subflare/internal/output"
 	"github.com/hidden-investigations/subflare/internal/pipeline"
 	"github.com/hidden-investigations/subflare/internal/source"
+	"github.com/hidden-investigations/subflare/internal/takeover"
+	"github.com/hidden-investigations/subflare/internal/util"
 	"github.com/hidden-investigations/subflare/internal/workflow"
 )
 
@@ -74,6 +78,10 @@ func main() {
 		printSources(source.AvailableSourceNames())
 		return
 	}
+	if opts.Takeover && subcommand != "scan" {
+		fmt.Fprintln(os.Stderr, "[ERR] --takeover can only be used with the default scan command")
+		os.Exit(1)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -92,8 +100,14 @@ func main() {
 			os.Exit(1)
 		}
 	default:
-		if err := runScan(ctx, opts); err != nil {
-			fmt.Fprintf(os.Stderr, "[ERR] %v\n", err)
+		var runErr error
+		if opts.Takeover {
+			runErr = runTakeover(ctx, opts)
+		} else {
+			runErr = runScan(ctx, opts)
+		}
+		if runErr != nil {
+			fmt.Fprintf(os.Stderr, "[ERR] %v\n", runErr)
 			os.Exit(1)
 		}
 	}
@@ -161,6 +175,85 @@ func runScan(ctx context.Context, opts options.Options) error {
 
 	if opts.JSONL != "" {
 		if err := output.WriteJSONL(opts.JSONL, allResults); err != nil {
+			return fmt.Errorf("write jsonl: %w", err)
+		}
+		if !opts.Silent {
+			fmt.Fprintf(os.Stderr, "[INF] wrote JSONL output to %s\n", opts.JSONL)
+		}
+	}
+
+	return nil
+}
+
+func runTakeover(ctx context.Context, opts options.Options) error {
+	hosts, err := collectTakeoverHosts(opts)
+	if err != nil {
+		return err
+	}
+	if len(hosts) == 0 {
+		return fmt.Errorf("takeover mode requires targets from -l, --stdin, pipe, or -d")
+	}
+
+	startedAt := time.Now()
+	now := time.Now().UTC().Unix()
+	candidates := make([]model.Candidate, 0, len(hosts))
+	for _, host := range hosts {
+		candidates = append(candidates, model.Candidate{
+			Host:          host,
+			Sources:       map[string]struct{}{"input": {}},
+			FirstSeenUnix: now,
+		})
+	}
+
+	resolver := dnsresolve.New(opts.Resolvers, opts.Timeout, opts.Retries)
+	resolved, unresolved, resolveErr := dnsresolve.ResolveCandidatesWithBackend(ctx, candidates, resolver, dnsresolve.BackendConfig{
+		Backend:     opts.DNSBackend,
+		Threads:     opts.Threads,
+		MassDNSPath: opts.MassDNSPath,
+	})
+	if resolveErr != nil {
+		return fmt.Errorf("resolve input hosts: %w", resolveErr)
+	}
+
+	trustedResolver := dnsresolve.New(opts.TrustedResolvers, opts.Timeout, opts.Retries)
+	validated, dropped := dnsresolve.ValidateResults(ctx, resolved, trustedResolver, opts.Threads)
+
+	httpProbed := 0
+	if opts.HTTPProbe {
+		validated, httpProbed = httpprobe.ProbeResults(ctx, validated, opts.HTTPProbeThreads, opts.HTTPProbeTimeout)
+	}
+
+	checked, takeoverChecked, takeoverSignals := takeover.CheckResults(ctx, validated, trustedResolver, opts.TakeoverTimeout, opts.TakeoverThreads)
+	flagged := filterTakeoverResults(checked)
+
+	if opts.Silent {
+		for _, result := range flagged {
+			fmt.Println(result.Host)
+		}
+	} else {
+		printTakeoverOnlySummary(takeoverOnlySummary{
+			Elapsed:         time.Since(startedAt),
+			InputHosts:      len(hosts),
+			ResolvedHosts:   len(resolved),
+			UnresolvedHosts: unresolved,
+			TrustedDropped:  dropped,
+			HTTPProbed:      httpProbed,
+			TakeoverChecked: takeoverChecked,
+			TakeoverSignals: takeoverSignals,
+		}, opts.HTTPProbe)
+		printTakeoverAssessment(checked)
+	}
+
+	if opts.Output != "" {
+		if err := output.WriteText(opts.Output, flagged); err != nil {
+			return fmt.Errorf("write output: %w", err)
+		}
+		if !opts.Silent {
+			fmt.Fprintf(os.Stderr, "[INF] wrote text output to %s\n", opts.Output)
+		}
+	}
+	if opts.JSONL != "" {
+		if err := output.WriteJSONL(opts.JSONL, flagged); err != nil {
 			return fmt.Errorf("write jsonl: %w", err)
 		}
 		if !opts.Silent {
@@ -324,38 +417,92 @@ func normalizeDiffShowMode(show string) string {
 }
 
 func collectDomains(opts options.Options) ([]string, error) {
+	return collectTargets(opts.Domain, opts.InputList, opts.Stdin, normalizeDomainInput)
+}
+
+func collectTakeoverHosts(opts options.Options) ([]string, error) {
+	readStdin := opts.Stdin || stdinHasPipedData()
+	return collectTargets(opts.Domain, opts.InputList, readStdin, normalizeHostInput)
+}
+
+func collectTargets(seed, listPath string, readStdin bool, normalize func(string) string) ([]string, error) {
 	set := map[string]struct{}{}
 	out := []string{}
-	if opts.Domain != "" {
-		set[opts.Domain] = struct{}{}
-		out = append(out, opts.Domain)
-	}
-	if !opts.Stdin {
-		return out, nil
+	appendTarget := func(raw string) {
+		target := normalize(raw)
+		if target == "" {
+			return
+		}
+		if _, exists := set[target]; exists {
+			return
+		}
+		set[target] = struct{}{}
+		out = append(out, target)
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		domain := strings.TrimSpace(strings.ToLower(scanner.Text()))
-		domain = strings.TrimPrefix(domain, "http://")
-		domain = strings.TrimPrefix(domain, "https://")
-		domain = strings.TrimPrefix(domain, "*.")
-		domain = strings.TrimSuffix(domain, "/")
-		domain = strings.TrimSuffix(domain, ".")
-		if domain == "" {
-			continue
+	appendTarget(seed)
+	if listPath != "" {
+		file, err := os.Open(listPath)
+		if err != nil {
+			return nil, fmt.Errorf("read list file: %w", err)
 		}
-		if _, ok := set[domain]; ok {
-			continue
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			appendTarget(line)
 		}
-		set[domain] = struct{}{}
-		out = append(out, domain)
+		if err := scanner.Err(); err != nil {
+			file.Close()
+			return nil, fmt.Errorf("read list file: %w", err)
+		}
+		file.Close()
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+
+	if readStdin {
+		stdinPiped := stdinHasPipedData()
+		shouldReadStdin := stdinPiped || len(out) == 0
+		if !shouldReadStdin {
+			sort.Strings(out)
+			return out, nil
+		}
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			appendTarget(line)
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, err
+		}
 	}
+
 	sort.Strings(out)
 	return out, nil
+}
+
+func normalizeDomainInput(input string) string {
+	return util.NormalizeDomain(util.NormalizeHost(input))
+}
+
+func normalizeHostInput(input string) string {
+	host := util.NormalizeHost(input)
+	if !strings.Contains(host, ".") {
+		return ""
+	}
+	return host
+}
+
+func stdinHasPipedData() bool {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return stat.Mode()&os.ModeCharDevice == 0
 }
 
 func parseSubcommand(args []string) (string, []string) {
@@ -533,6 +680,42 @@ type takeoverFinding struct {
 	Host     string
 	Provider string
 	Reason   string
+}
+
+type takeoverOnlySummary struct {
+	Elapsed         time.Duration
+	InputHosts      int
+	ResolvedHosts   int
+	UnresolvedHosts int
+	TrustedDropped  int
+	HTTPProbed      int
+	TakeoverChecked int
+	TakeoverSignals int
+}
+
+func filterTakeoverResults(results []model.Result) []model.Result {
+	filtered := make([]model.Result, 0)
+	for _, result := range results {
+		if result.TakeoverPotential {
+			filtered = append(filtered, result)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].Host < filtered[j].Host })
+	return filtered
+}
+
+func printTakeoverOnlySummary(summary takeoverOnlySummary, showHTTP bool) {
+	printInfoSection("takeover scan summary")
+	printInfoKV("elapsed", formatDuration(summary.Elapsed))
+	printInfoKV("input hosts", fmt.Sprintf("%d", summary.InputHosts))
+	printInfoKV("resolved hosts", fmt.Sprintf("%d", summary.ResolvedHosts))
+	printInfoKV("unresolved hosts", fmt.Sprintf("%d", summary.UnresolvedHosts))
+	printInfoKV("trusted validation dropped", fmt.Sprintf("%d", summary.TrustedDropped))
+	if showHTTP {
+		printInfoKV("http probed", fmt.Sprintf("%d", summary.HTTPProbed))
+	}
+	printInfoKV("takeover checked", fmt.Sprintf("%d", summary.TakeoverChecked))
+	printInfoKV("takeover signals", fmt.Sprintf("%d", summary.TakeoverSignals))
 }
 
 func collectTakeoverFindings(results []model.Result) []takeoverFinding {

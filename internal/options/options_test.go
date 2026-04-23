@@ -41,6 +41,39 @@ func TestParseAllowsStdinWithoutDomain(t *testing.T) {
 	}
 }
 
+func TestParseAllowsListWithoutDomain(t *testing.T) {
+	opts, err := parseForTest("-l", "targets.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.InputList != "targets.txt" {
+		t.Fatalf("unexpected input list: %q", opts.InputList)
+	}
+}
+
+func TestParseAllowsTakeoverWithoutDomain(t *testing.T) {
+	opts, err := parseForTest("--takeover")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !opts.Takeover {
+		t.Fatal("expected takeover=true")
+	}
+}
+
+func TestParseTakeoverWithListAndPassiveDisabled(t *testing.T) {
+	opts, err := parseForTest("--takeover", "--passive=false", "-l", "subs.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !opts.Takeover {
+		t.Fatal("expected takeover=true")
+	}
+	if opts.InputList != "subs.txt" {
+		t.Fatalf("unexpected input list: %q", opts.InputList)
+	}
+}
+
 func TestParseWordlistEnablesBruteforce(t *testing.T) {
 	opts, err := parseForTest("-d", "example.com", "-w", "subdomains-1000.txt")
 	if err != nil {

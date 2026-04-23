@@ -21,6 +21,8 @@ var (
 // Options contains CLI configuration for a scan.
 type Options struct {
 	Domain           string
+	InputList        string
+	Takeover         bool
 	Passive          bool
 	Bruteforce       bool
 	Wordlist         string
@@ -90,6 +92,9 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 
 	fs.StringVar(&opts.Domain, "domain", "", "target root domain")
 	fs.StringVar(&opts.Domain, "d", "", "target root domain")
+	fs.StringVar(&opts.InputList, "list", "", "input list file (domains/subdomains)")
+	fs.StringVar(&opts.InputList, "l", "", "input list file (domains/subdomains)")
+	fs.BoolVar(&opts.Takeover, "takeover", false, "run takeover-only checks against provided hosts")
 	fs.BoolVar(&opts.Passive, "passive", true, "enable passive source enumeration")
 	fs.BoolVar(&opts.Bruteforce, "bruteforce", false, "enable wordlist bruteforce")
 	fs.StringVar(&opts.Wordlist, "wordlist", "", "wordlist file path for bruteforce")
@@ -177,8 +182,9 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 	}
 
 	opts.Domain = normalizeDomain(opts.Domain)
-	if opts.Domain == "" && !opts.Stdin {
-		return opts, errors.New("domain is required (use -d example.com)")
+	opts.InputList = strings.TrimSpace(opts.InputList)
+	if !opts.Takeover && opts.Domain == "" && !opts.Stdin && opts.InputList == "" {
+		return opts, errors.New("domain is required (use -d example.com, --stdin, or -l targets.txt)")
 	}
 	if opts.Threads < 1 {
 		return opts, errors.New("threads must be > 0")
@@ -251,14 +257,16 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 		return opts, errors.New("massdns-path cannot be empty")
 	}
 
-	if opts.Wordlist != "" {
-		opts.Bruteforce = true
-	}
-	if opts.Bruteforce && opts.Wordlist == "" {
-		return opts, errors.New("bruteforce enabled but no wordlist supplied")
-	}
-	if !opts.Passive && !opts.Bruteforce {
-		return opts, errors.New("enable at least one mode: passive or bruteforce")
+	if !opts.Takeover {
+		if opts.Wordlist != "" {
+			opts.Bruteforce = true
+		}
+		if opts.Bruteforce && opts.Wordlist == "" {
+			return opts, errors.New("bruteforce enabled but no wordlist supplied")
+		}
+		if !opts.Passive && !opts.Bruteforce {
+			return opts, errors.New("enable at least one mode: passive or bruteforce")
+		}
 	}
 
 	resolvers, err := parseResolverInput(resolversInput)
@@ -301,6 +309,8 @@ func PrintHelp(w io.Writer, sourceNames []string) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Core Flags:")
 	fmt.Fprintln(w, "  -d, --domain string         target root domain")
+	fmt.Fprintln(w, "  -l, --list string           input list file (domains/subdomains)")
+	fmt.Fprintln(w, "  --takeover                  takeover-only mode (host list input)")
 	fmt.Fprintln(w, "  --passive                   enable passive source enumeration (default: true)")
 	fmt.Fprintln(w, "  --bruteforce                enable wordlist bruteforce")
 	fmt.Fprintln(w, "  -w, --wordlist string       wordlist file path for bruteforce")
@@ -371,10 +381,13 @@ func PrintHelp(w io.Writer, sourceNames []string) {
 	fmt.Fprintln(w, "  subflare -d example.com --permutation --permutation-depth 2 --permutation-max 5000")
 	fmt.Fprintln(w, "  subflare -d example.com --dns-backend massdns --massdns-path /usr/bin/massdns")
 	fmt.Fprintln(w, "  subflare -d example.com --rdns-expand --http-probe --takeover-check")
+	fmt.Fprintln(w, "  subflare --takeover -l subs.txt")
+	fmt.Fprintln(w, "  cat sub.txt | subflare --takeover")
 	fmt.Fprintln(w, "  subflare -d example.com -es shodan --rls 'crtsh=5/s,rapiddns=2/s'")
 	fmt.Fprintln(w, "  subflare -d example.com --provider-config ~/.config/subflare/providers.env")
 	fmt.Fprintln(w, "  subflare -d example.com --silent --no-banner -o results.txt --jsonl results.jsonl")
 	fmt.Fprintln(w, "  cat domains.txt | subflare --stdin --strict-io --no-banner")
+	fmt.Fprintln(w, "  subflare --stdin --strict-io --no-banner -l domain.txt")
 	fmt.Fprintln(w, "  subflare monitor -d example.com --monitor-interval 15m")
 	fmt.Fprintln(w, "  subflare diff --old old.txt --new new.txt")
 	fmt.Fprintln(w)

@@ -44,3 +44,31 @@ func TestCollectTakeoverFindings(t *testing.T) {
 		t.Fatalf("unexpected findings\n got: %#v\nwant: %#v", got, want)
 	}
 }
+
+func TestFilterTakeoverResults(t *testing.T) {
+	results := []model.Result{
+		{Host: "b.example.com", TakeoverPotential: true},
+		{Host: "a.example.com", TakeoverPotential: false},
+		{Host: "c.example.com", TakeoverPotential: true},
+	}
+	got := filterTakeoverResults(results)
+	want := []model.Result{
+		{Host: "b.example.com", TakeoverPotential: true},
+		{Host: "c.example.com", TakeoverPotential: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected filtered results\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestNormalizeTargetInputs(t *testing.T) {
+	if got := normalizeDomainInput(" https://Example.com/path "); got != "example.com" {
+		t.Fatalf("unexpected normalized domain: %q", got)
+	}
+	if got := normalizeHostInput("https://Sub.EXAMPLE.com/login"); got != "sub.example.com" {
+		t.Fatalf("unexpected normalized host: %q", got)
+	}
+	if got := normalizeHostInput("localhost"); got != "" {
+		t.Fatalf("expected localhost to be dropped, got %q", got)
+	}
+}
