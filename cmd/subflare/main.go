@@ -17,6 +17,7 @@ import (
 	"github.com/hidden-investigations/subflare/internal/bench"
 	"github.com/hidden-investigations/subflare/internal/dnsresolve"
 	"github.com/hidden-investigations/subflare/internal/httpprobe"
+	"github.com/hidden-investigations/subflare/internal/infra"
 	"github.com/hidden-investigations/subflare/internal/model"
 	"github.com/hidden-investigations/subflare/internal/options"
 	"github.com/hidden-investigations/subflare/internal/output"
@@ -86,8 +87,29 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	if err := takeover.ConfigureFingerprintsFromDisk(); err != nil && opts.Verbose && !opts.Silent {
+		fmt.Fprintf(os.Stderr, "[WARN] takeover fingerprints: %v\n", err)
+	}
+	if opts.UpdateFingerprints {
+		path, count, updateErr := takeover.UpdateFingerprints(ctx)
+		if updateErr != nil {
+			fmt.Fprintf(os.Stderr, "[ERR] %v\n", updateErr)
+			os.Exit(1)
+		}
+		if !opts.Silent {
+			fmt.Fprintf(os.Stderr, "[INF] updated takeover fingerprints: %d rules (%s)\n", count, path)
+		}
+		if opts.Domain == "" && opts.InputList == "" && !opts.Stdin && !opts.Takeover && subcommand == "scan" {
+			return
+		}
+	}
+
 	switch subcommand {
 	case "bench":
+		if opts.Domain == "" {
+			fmt.Fprintln(os.Stderr, "[ERR] bench requires -d domain")
+			os.Exit(1)
+		}
 		result, benchErr := bench.Run(ctx, opts)
 		if benchErr != nil {
 			fmt.Fprintf(os.Stderr, "[ERR] %v\n", benchErr)
@@ -205,25 +227,49 @@ func runTakeover(ctx context.Context, opts options.Options) error {
 		})
 	}
 
+	resolveThreads := opts.Threads
+	if opts.AutoTune {
+		resolveThreads = tuneConcurrencyByVolume(opts.Threads, len(candidates))
+	}
 	resolver := dnsresolve.New(opts.Resolvers, opts.Timeout, opts.Retries)
 	resolved, unresolved, resolveErr := dnsresolve.ResolveCandidatesWithBackend(ctx, candidates, resolver, dnsresolve.BackendConfig{
 		Backend:     opts.DNSBackend,
-		Threads:     opts.Threads,
+		Threads:     resolveThreads,
 		MassDNSPath: opts.MassDNSPath,
 	})
 	if resolveErr != nil {
 		return fmt.Errorf("resolve input hosts: %w", resolveErr)
 	}
 
+	validateThreads := opts.Threads
+	if opts.AutoTune {
+		validateThreads = tuneConcurrencyByFailureRate(opts.Threads, unresolved, len(candidates))
+	}
 	trustedResolver := dnsresolve.New(opts.TrustedResolvers, opts.Timeout, opts.Retries)
-	validated, dropped := dnsresolve.ValidateResults(ctx, resolved, trustedResolver, opts.Threads)
+	validated, dropped := dnsresolve.ValidateResults(ctx, resolved, trustedResolver, validateThreads)
 
 	httpProbed := 0
 	if opts.HTTPProbe {
-		validated, httpProbed = httpprobe.ProbeResults(ctx, validated, opts.HTTPProbeThreads, opts.HTTPProbeTimeout)
+		probeThreads := opts.HTTPProbeThreads
+		if opts.AutoTune {
+			probeThreads = tuneConcurrencyByFailureRate(opts.HTTPProbeThreads, dropped, len(resolved))
+		}
+		validated, httpProbed = httpprobe.ProbeResults(ctx, validated, probeThreads, opts.HTTPProbeTimeout)
 	}
 
-	checked, takeoverChecked, takeoverSignals := takeover.CheckResults(ctx, validated, trustedResolver, opts.TakeoverTimeout, opts.TakeoverThreads)
+	takeoverThreads := opts.TakeoverThreads
+	if opts.AutoTune {
+		takeoverThreads = tuneConcurrencyByFailureRate(opts.TakeoverThreads, dropped, len(resolved))
+	}
+	checked, takeoverChecked, takeoverSignals := takeover.CheckResults(ctx, validated, trustedResolver, opts.TakeoverTimeout, takeoverThreads)
+	infraEnriched := 0
+	if opts.EnrichInfra {
+		enrichThreads := validateThreads
+		if enrichThreads < 8 {
+			enrichThreads = 8
+		}
+		checked, infraEnriched = infra.EnrichResults(ctx, checked, opts.TrustedResolvers, opts.Timeout, enrichThreads)
+	}
 	flagged := filterTakeoverResults(checked)
 
 	if opts.Silent {
@@ -238,8 +284,11 @@ func runTakeover(ctx context.Context, opts options.Options) error {
 			UnresolvedHosts: unresolved,
 			TrustedDropped:  dropped,
 			HTTPProbed:      httpProbed,
+			AutoTuneEnabled: opts.AutoTune,
 			TakeoverChecked: takeoverChecked,
 			TakeoverSignals: takeoverSignals,
+			InfraEnabled:    opts.EnrichInfra,
+			InfraEnriched:   infraEnriched,
 		}, opts.HTTPProbe)
 		printTakeoverAssessment(checked)
 	}
@@ -299,7 +348,7 @@ func runMonitor(ctx context.Context, opts options.Options) error {
 			}
 		}
 
-		if opts.StrictIO {
+		if opts.StrictIO || opts.OnlyNew {
 			for _, host := range delta.New {
 				fmt.Println(host)
 			}
@@ -555,10 +604,16 @@ func printScanSummary(domain string, stats pipeline.Stats, duration time.Duratio
 	if stats.RDNSSeeded > 0 || stats.RDNSResolved > 0 {
 		printInfoKV("reverse-dns expansion", fmt.Sprintf("seeded=%d, resolved=%d", stats.RDNSSeeded, stats.RDNSResolved))
 	}
+	if stats.AutoTuneEnabled {
+		printInfoKV("auto tune", "enabled")
+	}
 	printInfoKV("wildcard dropped", fmt.Sprintf("%d", stats.WildcardDropped))
 	printInfoKV("trusted validation dropped", fmt.Sprintf("%d", stats.TrustedDropped))
 	if stats.HTTPProbeEnabled {
 		printInfoKV("http probed", fmt.Sprintf("%d", stats.HTTPProbed))
+	}
+	if stats.InfraEnabled {
+		printInfoKV("infra enriched", fmt.Sprintf("%d", stats.InfraEnriched))
 	}
 	if stats.TakeoverEnabled {
 		printInfoKV("takeover checked", fmt.Sprintf("%d", stats.TakeoverChecked))
@@ -645,6 +700,63 @@ func formatDuration(d time.Duration) string {
 	return d.Round(10 * time.Millisecond).String()
 }
 
+func tuneConcurrencyByFailureRate(base, failed, total int) int {
+	if base < 1 {
+		base = 1
+	}
+	if total < 1 {
+		return base
+	}
+	failureRate := float64(failed) / float64(total)
+	switch {
+	case failureRate >= 0.70:
+		return maxInt(base/3, 8)
+	case failureRate >= 0.50:
+		return maxInt(base/2, 12)
+	case failureRate >= 0.30:
+		return maxInt((base*7)/10, 16)
+	case failureRate <= 0.05 && total >= 200:
+		return minInt((base*12)/10, base+64)
+	case failureRate <= 0.15 && total >= 100:
+		return minInt((base*11)/10, base+32)
+	default:
+		return base
+	}
+}
+
+func tuneConcurrencyByVolume(base, total int) int {
+	if base < 1 {
+		base = 1
+	}
+	if total <= 0 {
+		return base
+	}
+	if total < base/2 {
+		return minInt(base, maxInt(total, 16))
+	}
+	if total > 5000 {
+		return minInt(base+64, 512)
+	}
+	if total > 2000 {
+		return minInt(base+32, 400)
+	}
+	return base
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func printSources(names []string) {
 	fmt.Printf("Available passive sources (%d):\n", len(names))
 	for _, name := range names {
@@ -677,9 +789,10 @@ func printInfoKV(key, value string) {
 }
 
 type takeoverFinding struct {
-	Host     string
-	Provider string
-	Reason   string
+	Host       string
+	Provider   string
+	Reason     string
+	Confidence string
 }
 
 type takeoverOnlySummary struct {
@@ -689,8 +802,11 @@ type takeoverOnlySummary struct {
 	UnresolvedHosts int
 	TrustedDropped  int
 	HTTPProbed      int
+	AutoTuneEnabled bool
 	TakeoverChecked int
 	TakeoverSignals int
+	InfraEnabled    bool
+	InfraEnriched   int
 }
 
 func filterTakeoverResults(results []model.Result) []model.Result {
@@ -714,13 +830,18 @@ func printTakeoverOnlySummary(summary takeoverOnlySummary, showHTTP bool) {
 	if showHTTP {
 		printInfoKV("http probed", fmt.Sprintf("%d", summary.HTTPProbed))
 	}
+	if summary.AutoTuneEnabled {
+		printInfoKV("auto tune", "enabled")
+	}
+	if summary.InfraEnabled {
+		printInfoKV("infra enriched", fmt.Sprintf("%d", summary.InfraEnriched))
+	}
 	printInfoKV("takeover checked", fmt.Sprintf("%d", summary.TakeoverChecked))
 	printInfoKV("takeover signals", fmt.Sprintf("%d", summary.TakeoverSignals))
 }
 
 func collectTakeoverFindings(results []model.Result) []takeoverFinding {
-	findings := make([]takeoverFinding, 0)
-	seen := map[string]struct{}{}
+	byHost := map[string]takeoverFinding{}
 	for _, result := range results {
 		if !result.TakeoverPotential {
 			continue
@@ -729,18 +850,42 @@ func collectTakeoverFindings(results []model.Result) []takeoverFinding {
 		if host == "" {
 			continue
 		}
-		if _, exists := seen[host]; exists {
+		current := takeoverFinding{
+			Host:       host,
+			Provider:   strings.TrimSpace(result.TakeoverProvider),
+			Reason:     strings.TrimSpace(result.TakeoverReason),
+			Confidence: strings.TrimSpace(strings.ToLower(result.TakeoverConfidence)),
+		}
+		existing, exists := byHost[host]
+		if !exists || takeoverConfidenceRank(current.Confidence) > takeoverConfidenceRank(existing.Confidence) {
+			byHost[host] = current
 			continue
 		}
-		seen[host] = struct{}{}
-		findings = append(findings, takeoverFinding{
-			Host:     host,
-			Provider: strings.TrimSpace(result.TakeoverProvider),
-			Reason:   strings.TrimSpace(result.TakeoverReason),
-		})
+		if exists && existing.Reason == "" && current.Reason != "" {
+			existing.Reason = current.Reason
+			byHost[host] = existing
+		}
+	}
+
+	findings := make([]takeoverFinding, 0, len(byHost))
+	for _, finding := range byHost {
+		findings = append(findings, finding)
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].Host < findings[j].Host })
 	return findings
+}
+
+func takeoverConfidenceRank(confidence string) int {
+	switch strings.ToLower(strings.TrimSpace(confidence)) {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func printTakeoverAssessment(results []model.Result) {
@@ -758,10 +903,14 @@ func printTakeoverAssessment(results []model.Result) {
 		if provider == "" {
 			provider = "unknown-provider"
 		}
+		confidence := strings.ToUpper(strings.TrimSpace(finding.Confidence))
+		if confidence == "" {
+			confidence = "LOW"
+		}
 		reason := finding.Reason
 		if reason == "" {
 			reason = "signal matched"
 		}
-		fmt.Fprintf(os.Stderr, "[TAKEOVER] %s | provider=%s | reason=%s\n", finding.Host, provider, reason)
+		fmt.Fprintf(os.Stderr, "[TAKEOVER][%s] %s | provider=%s | reason=%s\n", confidence, finding.Host, provider, reason)
 	}
 }

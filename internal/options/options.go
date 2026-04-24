@@ -20,64 +20,68 @@ var (
 
 // Options contains CLI configuration for a scan.
 type Options struct {
-	Domain           string
-	InputList        string
-	Takeover         bool
-	Passive          bool
-	Bruteforce       bool
-	Wordlist         string
-	BruteforceDepth  int
-	BruteforceMax    int
-	Permutation      bool
-	PermutationDepth int
-	PermutationMax   int
-	Sources          []string
-	ExcludeSources   []string
-	ListSources      bool
-	NoBanner         bool
-	ProviderConfig   string
-	RateLimit        float64
-	SourceRateLimits map[string]float64
-	SourceTimeout    time.Duration
-	SourceTimeouts   map[string]time.Duration
-	SourceRetries    int
-	SourceBackoff    time.Duration
-	SourceMaxBackoff time.Duration
-	CacheDir         string
-	CacheTTL         time.Duration
-	NoCache          bool
-	Stdin            bool
-	StrictIO         bool
-	WebhookURLs      []string
-	DiscordWebhook   string
-	SlackWebhook     string
-	TelegramBotToken string
-	TelegramChatID   string
-	WebhookTimeout   time.Duration
-	MonitorInterval  time.Duration
-	MonitorCycles    int
-	StateDir         string
-	Resolvers        []string
-	TrustedResolvers []string
-	Threads          int
-	DNSBackend       string
-	MassDNSPath      string
-	RDNSExpand       bool
-	RDNSLimit        int
-	HTTPProbe        bool
-	HTTPProbeTimeout time.Duration
-	HTTPProbeThreads int
-	TakeoverCheck    bool
-	TakeoverThreads  int
-	TakeoverTimeout  time.Duration
-	Timeout          time.Duration
-	Retries          int
-	HTTPTimeout      time.Duration
-	WildcardTests    int
-	Output           string
-	JSONL            string
-	Silent           bool
-	Verbose          bool
+	Domain             string
+	InputList          string
+	Takeover           bool
+	UpdateFingerprints bool
+	Passive            bool
+	Bruteforce         bool
+	Wordlist           string
+	BruteforceDepth    int
+	BruteforceMax      int
+	Permutation        bool
+	PermutationDepth   int
+	PermutationMax     int
+	Sources            []string
+	ExcludeSources     []string
+	ListSources        bool
+	NoBanner           bool
+	ProviderConfig     string
+	RateLimit          float64
+	SourceRateLimits   map[string]float64
+	SourceTimeout      time.Duration
+	SourceTimeouts     map[string]time.Duration
+	SourceRetries      int
+	SourceBackoff      time.Duration
+	SourceMaxBackoff   time.Duration
+	CacheDir           string
+	CacheTTL           time.Duration
+	NoCache            bool
+	AutoTune           bool
+	Stdin              bool
+	StrictIO           bool
+	OnlyNew            bool
+	WebhookURLs        []string
+	DiscordWebhook     string
+	SlackWebhook       string
+	TelegramBotToken   string
+	TelegramChatID     string
+	WebhookTimeout     time.Duration
+	MonitorInterval    time.Duration
+	MonitorCycles      int
+	StateDir           string
+	Resolvers          []string
+	TrustedResolvers   []string
+	Threads            int
+	DNSBackend         string
+	MassDNSPath        string
+	RDNSExpand         bool
+	RDNSLimit          int
+	EnrichInfra        bool
+	HTTPProbe          bool
+	HTTPProbeTimeout   time.Duration
+	HTTPProbeThreads   int
+	TakeoverCheck      bool
+	TakeoverThreads    int
+	TakeoverTimeout    time.Duration
+	Timeout            time.Duration
+	Retries            int
+	HTTPTimeout        time.Duration
+	WildcardTests      int
+	Output             string
+	JSONL              string
+	Silent             bool
+	Verbose            bool
 }
 
 func Parse(fs *flag.FlagSet, args []string) (Options, error) {
@@ -95,6 +99,7 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 	fs.StringVar(&opts.InputList, "list", "", "input list file (domains/subdomains)")
 	fs.StringVar(&opts.InputList, "l", "", "input list file (domains/subdomains)")
 	fs.BoolVar(&opts.Takeover, "takeover", false, "run takeover-only checks against provided hosts")
+	fs.BoolVar(&opts.UpdateFingerprints, "update-fingerprints", false, "update takeover fingerprints before scan")
 	fs.BoolVar(&opts.Passive, "passive", true, "enable passive source enumeration")
 	fs.BoolVar(&opts.Bruteforce, "bruteforce", false, "enable wordlist bruteforce")
 	fs.StringVar(&opts.Wordlist, "wordlist", "", "wordlist file path for bruteforce")
@@ -122,8 +127,10 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 	fs.StringVar(&opts.CacheDir, "cache-dir", "", "cache directory for passive source responses (default: ~/.cache/subflare)")
 	fs.DurationVar(&opts.CacheTTL, "cache-ttl", 24*time.Hour, "cache TTL for passive source responses")
 	fs.BoolVar(&opts.NoCache, "no-cache", false, "disable passive-source cache usage")
+	fs.BoolVar(&opts.AutoTune, "auto-tune", false, "auto-tune concurrency based on timeout/error rate")
 	fs.BoolVar(&opts.Stdin, "stdin", false, "read domains from stdin (one per line)")
 	fs.BoolVar(&opts.StrictIO, "strict-io", false, "strict automation mode (no banner/stats, output only results)")
+	fs.BoolVar(&opts.OnlyNew, "only-new", false, "monitor mode: print only new hosts")
 	fs.StringVar(&webhookInput, "webhook", "", "comma-separated generic webhook URLs")
 	fs.StringVar(&opts.DiscordWebhook, "webhook-discord", "", "discord webhook URL")
 	fs.StringVar(&opts.SlackWebhook, "webhook-slack", "", "slack webhook URL")
@@ -143,6 +150,7 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 	fs.StringVar(&opts.MassDNSPath, "massdns-path", "massdns", "massdns binary path when --dns-backend massdns")
 	fs.BoolVar(&opts.RDNSExpand, "rdns-expand", false, "expand candidates from reverse DNS of resolved IPs")
 	fs.IntVar(&opts.RDNSLimit, "rdns-limit", 1000, "max candidates added by reverse DNS expansion")
+	fs.BoolVar(&opts.EnrichInfra, "enrich-infra", false, "enrich validated hosts with ASN/CDN hints")
 	fs.BoolVar(&opts.HTTPProbe, "http-probe", false, "probe final hosts over HTTP/HTTPS for status/title/tech")
 	fs.DurationVar(&opts.HTTPProbeTimeout, "http-probe-timeout", 5*time.Second, "timeout for HTTP probe requests")
 	fs.IntVar(&opts.HTTPProbeThreads, "http-probe-threads", 50, "concurrency for HTTP probing")
@@ -183,7 +191,8 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 
 	opts.Domain = normalizeDomain(opts.Domain)
 	opts.InputList = strings.TrimSpace(opts.InputList)
-	if !opts.Takeover && opts.Domain == "" && !opts.Stdin && opts.InputList == "" {
+	updateOnlyMode := opts.UpdateFingerprints && opts.Domain == "" && opts.InputList == "" && !opts.Stdin && !opts.Takeover
+	if !opts.Takeover && !opts.UpdateFingerprints && opts.Domain == "" && !opts.Stdin && opts.InputList == "" {
 		return opts, errors.New("domain is required (use -d example.com, --stdin, or -l targets.txt)")
 	}
 	if opts.Threads < 1 {
@@ -257,7 +266,7 @@ func Parse(fs *flag.FlagSet, args []string) (Options, error) {
 		return opts, errors.New("massdns-path cannot be empty")
 	}
 
-	if !opts.Takeover {
+	if !opts.Takeover && !updateOnlyMode {
 		if opts.Wordlist != "" {
 			opts.Bruteforce = true
 		}
@@ -311,6 +320,7 @@ func PrintHelp(w io.Writer, sourceNames []string) {
 	fmt.Fprintln(w, "  -d, --domain string         target root domain")
 	fmt.Fprintln(w, "  -l, --list string           input list file (domains/subdomains)")
 	fmt.Fprintln(w, "  --takeover                  takeover-only mode (host list input)")
+	fmt.Fprintln(w, "  --update-fingerprints       update takeover fingerprint pack")
 	fmt.Fprintln(w, "  --passive                   enable passive source enumeration (default: true)")
 	fmt.Fprintln(w, "  --bruteforce                enable wordlist bruteforce")
 	fmt.Fprintln(w, "  -w, --wordlist string       wordlist file path for bruteforce")
@@ -336,8 +346,10 @@ func PrintHelp(w io.Writer, sourceNames []string) {
 	fmt.Fprintln(w, "  --cache-dir string          cache directory for passive responses")
 	fmt.Fprintln(w, "  --cache-ttl duration        cache validity for passive responses")
 	fmt.Fprintln(w, "  --no-cache                  disable passive-source cache")
+	fmt.Fprintln(w, "  --auto-tune                 adaptive concurrency tuning")
 	fmt.Fprintln(w, "  --stdin                     read domains from stdin")
 	fmt.Fprintln(w, "  --strict-io                 machine-friendly output mode")
+	fmt.Fprintln(w, "  --only-new                  monitor mode: print only new hosts")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Workflow Flags:")
 	fmt.Fprintln(w, "  --monitor-interval duration monitor scan interval")
@@ -358,6 +370,7 @@ func PrintHelp(w io.Writer, sourceNames []string) {
 	fmt.Fprintln(w, "  --massdns-path string       massdns binary path")
 	fmt.Fprintln(w, "  --rdns-expand               reverse-dns expansion mode")
 	fmt.Fprintln(w, "  --rdns-limit int            max rdns expansion candidates")
+	fmt.Fprintln(w, "  --enrich-infra              enrich results with ASN/CDN hints")
 	fmt.Fprintln(w, "  --timeout duration          per-request DNS timeout (default: 3s)")
 	fmt.Fprintln(w, "  --retries int               DNS retries per host (default: 2)")
 	fmt.Fprintln(w, "  --wildcard-tests int        random checks per suffix (default: 2)")
@@ -381,6 +394,8 @@ func PrintHelp(w io.Writer, sourceNames []string) {
 	fmt.Fprintln(w, "  subflare -d example.com --permutation --permutation-depth 2 --permutation-max 5000")
 	fmt.Fprintln(w, "  subflare -d example.com --dns-backend massdns --massdns-path /usr/bin/massdns")
 	fmt.Fprintln(w, "  subflare -d example.com --rdns-expand --http-probe --takeover-check")
+	fmt.Fprintln(w, "  subflare -d example.com --enrich-infra --auto-tune")
+	fmt.Fprintln(w, "  subflare --update-fingerprints")
 	fmt.Fprintln(w, "  subflare --takeover -l subs.txt")
 	fmt.Fprintln(w, "  cat sub.txt | subflare --takeover")
 	fmt.Fprintln(w, "  subflare -d example.com -es shodan --rls 'crtsh=5/s,rapiddns=2/s'")

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -37,6 +38,16 @@ func TestLoadExpired(t *testing.T) {
 	}
 	if hit {
 		t.Fatal("expected cache miss due to expiration")
+	}
+}
+
+func TestSaveCreatesIndex(t *testing.T) {
+	dir := t.TempDir()
+	if err := Save(dir, "crtsh", "example.com", []string{"a.example.com"}); err != nil {
+		t.Fatalf("save cache: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.json")); err != nil {
+		t.Fatalf("expected index file: %v", err)
 	}
 }
 

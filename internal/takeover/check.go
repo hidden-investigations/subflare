@@ -15,66 +15,11 @@ import (
 )
 
 type fingerprint struct {
-	Provider          string
-	Suffixes          []string
-	Indicators        []string
-	ExcludeIndicators []string
-	StatusCodes       []int
-}
-
-var fingerprints = []fingerprint{
-	{
-		Provider:    "github-pages",
-		Suffixes:    []string{".github.io"},
-		Indicators:  []string{"there isn't a github pages site here"},
-		StatusCodes: []int{404},
-	},
-	{
-		Provider:   "heroku",
-		Suffixes:   []string{".herokudns.com", ".herokussl.com", ".herokuapp.com"},
-		Indicators: []string{"no such app", "there is no app configured at that hostname"},
-		StatusCodes: []int{
-			404,
-		},
-	},
-	{
-		Provider:    "readthedocs",
-		Suffixes:    []string{".readthedocs.io"},
-		Indicators:  []string{"unknown domain"},
-		StatusCodes: []int{404},
-	},
-	{
-		Provider:    "pantheon",
-		Suffixes:    []string{".pantheonsite.io"},
-		Indicators:  []string{"the gods are wise, but do not know of the domain", "404 error unknown site!"},
-		StatusCodes: []int{404},
-	},
-	{
-		Provider:   "aws-s3",
-		Suffixes:   []string{".s3.amazonaws.com", ".s3-website-us-east-1.amazonaws.com", ".s3-website-us-west-2.amazonaws.com", ".s3-website.eu-west-1.amazonaws.com", ".s3-website.ap-south-1.amazonaws.com"},
-		Indicators: []string{"nosuchbucket", "the specified bucket does not exist"},
-		StatusCodes: []int{
-			404,
-		},
-	},
-	{
-		Provider:    "azure-app-service",
-		Suffixes:    []string{".azurewebsites.net"},
-		Indicators:  []string{"404 web site not found", "web site not found"},
-		StatusCodes: []int{404},
-	},
-	{
-		Provider:    "vercel",
-		Suffixes:    []string{".vercel.app"},
-		Indicators:  []string{"deployment_not_found", "the deployment could not be found", "no such deployment"},
-		StatusCodes: []int{404},
-	},
-	{
-		Provider:    "surge",
-		Suffixes:    []string{".surge.sh"},
-		Indicators:  []string{"project not found"},
-		StatusCodes: []int{404},
-	},
+	Provider          string   `json:"Provider"`
+	Suffixes          []string `json:"Suffixes"`
+	Indicators        []string `json:"Indicators"`
+	ExcludeIndicators []string `json:"ExcludeIndicators,omitempty"`
+	StatusCodes       []int    `json:"StatusCodes,omitempty"`
 }
 
 type takeoverMatch struct {
@@ -152,7 +97,7 @@ func CheckResults(ctx context.Context, results []model.Result, resolver *dnsreso
 			if state.Reason != "" {
 				reason = fmt.Sprintf("dangling cname target (%s)", state.Reason)
 			}
-			markPotential(&out[task.Index], match.Provider, reason)
+			markPotential(&out[task.Index], match.Provider, reason, "high")
 			signals++
 			flagged = true
 			break
@@ -166,7 +111,7 @@ func CheckResults(ctx context.Context, results []model.Result, resolver *dnsreso
 		if title != "" {
 			for _, match := range task.Matches {
 				if matchesHTTPFingerprint(match, status, title) {
-					markPotential(&out[task.Index], match.Provider, "service fingerprint matched")
+					markPotential(&out[task.Index], match.Provider, "service fingerprint matched", confidenceFromHTTP(status, match))
 					signals++
 					flagged = true
 					break
@@ -198,7 +143,7 @@ func CheckResults(ctx context.Context, results []model.Result, resolver *dnsreso
 		}
 		for _, match := range task.Matches {
 			if matchesHTTPFingerprint(match, status, combinedText) {
-				markPotential(&out[task.Index], match.Provider, "service fingerprint matched")
+				markPotential(&out[task.Index], match.Provider, "service fingerprint matched", confidenceFromHTTP(status, match))
 				signals++
 				break
 			}
@@ -209,7 +154,7 @@ func CheckResults(ctx context.Context, results []model.Result, resolver *dnsreso
 }
 
 func matchFingerprint(cname string) (fingerprint, bool) {
-	for _, fp := range fingerprints {
+	for _, fp := range fingerprintSnapshot() {
 		for _, suffix := range fp.Suffixes {
 			if strings.HasSuffix(cname, suffix) {
 				return fp, true
@@ -487,10 +432,45 @@ func classifyDNSError(err error) (bool, string) {
 	}
 }
 
-func markPotential(result *model.Result, provider, reason string) {
-	result.TakeoverPotential = true
-	result.TakeoverProvider = provider
-	result.TakeoverReason = reason
+func markPotential(result *model.Result, provider, reason, confidence string) {
+	if strings.TrimSpace(confidence) == "" {
+		confidence = "low"
+	}
+	if !result.TakeoverPotential {
+		result.TakeoverPotential = true
+		result.TakeoverProvider = provider
+		result.TakeoverReason = reason
+		result.TakeoverConfidence = confidence
+		return
+	}
+	if confidenceRank(confidence) > confidenceRank(result.TakeoverConfidence) {
+		result.TakeoverProvider = provider
+		result.TakeoverReason = reason
+		result.TakeoverConfidence = confidence
+	}
+}
+
+func confidenceFromHTTP(status int, match takeoverMatch) string {
+	if status > 0 && statusAllowed(status, match.Statuses) {
+		return "medium"
+	}
+	if len(match.Statuses) == 0 {
+		return "medium"
+	}
+	return "low"
+}
+
+func confidenceRank(value string) int {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func defaultWorkerCount(total int) int {

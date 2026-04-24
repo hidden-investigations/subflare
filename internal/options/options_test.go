@@ -61,6 +61,33 @@ func TestParseAllowsTakeoverWithoutDomain(t *testing.T) {
 	}
 }
 
+func TestParseAllowsUpdateFingerprintsWithoutDomain(t *testing.T) {
+	opts, err := parseForTest("--update-fingerprints")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !opts.UpdateFingerprints {
+		t.Fatal("expected update-fingerprints=true")
+	}
+}
+
+func TestParseAllowsUpdateOnlyWithPassiveDisabled(t *testing.T) {
+	opts, err := parseForTest("--update-fingerprints", "--passive=false")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !opts.UpdateFingerprints {
+		t.Fatal("expected update-fingerprints=true")
+	}
+}
+
+func TestParseStillValidatesModesWhenScanTargetsPresent(t *testing.T) {
+	_, err := parseForTest("--update-fingerprints", "-d", "example.com", "--passive=false")
+	if err == nil {
+		t.Fatal("expected mode validation error when scan target is present")
+	}
+}
+
 func TestParseTakeoverWithListAndPassiveDisabled(t *testing.T) {
 	opts, err := parseForTest("--takeover", "--passive=false", "-l", "subs.txt")
 	if err != nil {
@@ -194,18 +221,30 @@ func TestParsePhase5Flags(t *testing.T) {
 		"-d", "example.com",
 		"--rdns-expand",
 		"--rdns-limit", "300",
+		"--enrich-infra",
+		"--auto-tune",
 		"--http-probe",
 		"--http-probe-timeout", "7s",
 		"--http-probe-threads", "25",
 		"--takeover-check",
 		"--takeover-threads", "12",
 		"--takeover-timeout", "4s",
+		"--only-new",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !opts.RDNSExpand || opts.RDNSLimit != 300 {
 		t.Fatalf("unexpected rdns flags: enabled=%v limit=%d", opts.RDNSExpand, opts.RDNSLimit)
+	}
+	if !opts.EnrichInfra {
+		t.Fatal("expected enrich-infra=true")
+	}
+	if !opts.AutoTune {
+		t.Fatal("expected auto-tune=true")
+	}
+	if !opts.OnlyNew {
+		t.Fatal("expected only-new=true")
 	}
 	if !opts.HTTPProbe || opts.HTTPProbeThreads != 25 || opts.HTTPProbeTimeout != 7*time.Second {
 		t.Fatalf("unexpected http probe flags: enabled=%v threads=%d timeout=%s", opts.HTTPProbe, opts.HTTPProbeThreads, opts.HTTPProbeTimeout)

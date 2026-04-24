@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,37 +20,61 @@ func ResolveStateDir(path string) string {
 	if trimmed != "" {
 		return trimmed
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".subflare-state"
-	}
-	return filepath.Join(home, ".local", "share", "subflare", "state")
+	return defaultStateDir()
 }
 
 func LoadSnapshot(stateDir, domain string) ([]string, bool, error) {
-	path := snapshotPath(ResolveStateDir(stateDir), domain)
-	file, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
+	dirs := stateDirCandidates(stateDir)
+	for _, dir := range dirs {
+		path := snapshotPath(dir, domain)
+		file, err := os.Open(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			if isPermissionLikeErr(err) && strings.TrimSpace(stateDir) == "" {
+				continue
+			}
+			return nil, false, err
 		}
-		return nil, false, err
-	}
-	defer file.Close()
 
-	var snapshot Snapshot
-	if err := json.NewDecoder(file).Decode(&snapshot); err != nil {
-		return nil, false, err
+		var snapshot Snapshot
+		decodeErr := json.NewDecoder(file).Decode(&snapshot)
+		file.Close()
+		if decodeErr != nil {
+			return nil, false, decodeErr
+		}
+		return uniqueSorted(snapshot.Subdomain), true, nil
 	}
-	return uniqueSorted(snapshot.Subdomain), true, nil
+	return nil, false, nil
 }
 
 func SaveSnapshot(stateDir, domain string, hosts []string) error {
-	resolved := ResolveStateDir(stateDir)
-	if err := os.MkdirAll(resolved, 0o755); err != nil {
+	dirs := stateDirCandidates(stateDir)
+	var lastErr error
+
+	for _, dir := range dirs {
+		if err := saveSnapshotToDir(dir, domain, hosts); err != nil {
+			lastErr = err
+			if strings.TrimSpace(stateDir) != "" || !isPermissionLikeErr(err) {
+				return err
+			}
+			continue
+		}
+		return nil
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("unable to save snapshot")
+	}
+	return lastErr
+}
+
+func saveSnapshotToDir(stateDir, domain string, hosts []string) error {
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return err
 	}
-	path := snapshotPath(resolved, domain)
+	path := snapshotPath(stateDir, domain)
 	tmpPath := path + ".tmp"
 
 	file, err := os.Create(tmpPath)
@@ -71,6 +96,42 @@ func SaveSnapshot(stateDir, domain string, hosts []string) error {
 		return err
 	}
 	return nil
+}
+
+func stateDirCandidates(path string) []string {
+	explicit := strings.TrimSpace(path)
+	if explicit != "" {
+		return []string{explicit}
+	}
+	primary := defaultStateDir()
+	fallback := fallbackStateDir()
+	if filepath.Clean(primary) == filepath.Clean(fallback) {
+		return []string{primary}
+	}
+	return []string{primary, fallback}
+}
+
+func defaultStateDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".subflare-state"
+	}
+	return filepath.Join(home, ".local", "share", "subflare", "state")
+}
+
+func fallbackStateDir() string {
+	return filepath.Join(os.TempDir(), "subflare-state")
+}
+
+func isPermissionLikeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsPermission(err) {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(lower, "read-only file system")
 }
 
 func snapshotPath(stateDir, domain string) string {

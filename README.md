@@ -41,15 +41,18 @@ By using this project, you agree to follow all applicable laws and regulations.
 
 - ⚡ **High-speed passive recon** across 25 integrated sources
 - 🧠 **Source runtime controls**: retries, backoff, rate limits, per-source timeout
-- 🗂️ **Passive cache layer** for faster repeated runs
+- 🗂️ **Passive cache layer + persistent cache index** for faster reruns on large scopes
 - 🔁 **Recursive bruteforce + smart permutations** for deeper host expansion
 - 🌐 **DNS validation pipeline** with resolver health scoring
 - 🚀 **Pluggable DNS backend** (`standard` or `massdns`)
 - 🔎 **Reverse DNS expansion** to discover additional in-scope hosts
 - 🧹 **Wildcard filtering** + trusted-resolver revalidation
+- 🛰️ **Infrastructure enrichment** with ASN/CDN hints (`--enrich-infra`)
 - 🌍 **HTTP probe handoff** (status, title, basic technology hints)
-- 🛡️ **Takeover signal checks** (fingerprint-based CNAME/service validation)
+- 🛡️ **Takeover signal checks** with confidence scoring (`low`/`medium`/`high`)
+- 🔄 **Fingerprint update mode** (`--update-fingerprints`) for takeover rules
 - 🎯 **Takeover-only mode** for checking existing subdomain lists (`--takeover`)
+- ⚙️ **Adaptive concurrency** (`--auto-tune`) based on observed failure rate
 - 🧾 **Production-friendly CLI UX** with structured summary, result, and takeover sections
 - 📊 **Readable scan summary** for operator workflow
 - 🤖 **Automation mode** with strict stdout-only output
@@ -145,9 +148,10 @@ cat domains.txt | subflare --stdin --strict-io --no-banner
 
 | Option | Description | Default |
 |-------|-------------|---------|
-| `-d`, `--domain` | Target root domain | required unless `--stdin`, `-l`, or `--takeover` |
+| `-d`, `--domain` | Target root domain | required unless `--stdin`, `-l`, `--takeover`, or `--update-fingerprints` |
 | `-l`, `--list` | Input list file (domains/subdomains) | none |
 | `--takeover` | Run takeover-only mode on provided hosts | `false` |
+| `--update-fingerprints` | Update takeover fingerprint pack (and continue/exit) | `false` |
 | `--passive` | Enable passive collection | `true` |
 | `--bruteforce` | Enable bruteforce mode | `false` |
 | `-w`, `--wordlist` | Bruteforce wordlist path | none |
@@ -176,6 +180,7 @@ cat domains.txt | subflare --stdin --strict-io --no-banner
 | `--cache-dir` | Passive cache directory | `~/.cache/subflare` |
 | `--cache-ttl` | Passive cache TTL | `24h` |
 | `--no-cache` | Disable passive cache | off |
+| `--auto-tune` | Adaptive concurrency by timeout/error rate | off |
 
 ### DNS validation options
 
@@ -198,6 +203,7 @@ cat domains.txt | subflare --stdin --strict-io --no-banner
 |-------|-------------|---------|
 | `--takeover` | Run takeover-only mode on provided hosts | `false` |
 | `-l`, `--list` | Input list file for takeover-only target hosts | none |
+| `--enrich-infra` | Enrich validated hosts with ASN/CDN hints | `false` |
 | `--http-probe` | Probe validated hosts over HTTP/HTTPS | `false` |
 | `--http-probe-timeout` | Timeout for HTTP probe requests | `5s` |
 | `--http-probe-threads` | Concurrency for HTTP probing | `50` |
@@ -222,7 +228,8 @@ cat domains.txt | subflare --stdin --strict-io --no-banner
 |-------|-------------|---------|
 | `--monitor-interval` | Monitor interval | `10m` |
 | `--monitor-cycles` | Number of cycles (`0` infinite) | `0` |
-| `--state-dir` | Snapshot state directory | tool default |
+| `--only-new` | Monitor mode stdout: print only newly discovered hosts | off |
+| `--state-dir` | Snapshot state directory | tool default (falls back to `/tmp/subflare-state` when default is not writable) |
 | `--webhook` | Generic webhook URL list | none |
 | `--webhook-discord` | Discord webhook URL | none |
 | `--webhook-slack` | Slack webhook URL | none |
@@ -331,6 +338,12 @@ Reverse-DNS + HTTP probe + takeover checks:
 subflare -d hiddeninvestigations.net --rdns-expand --http-probe --takeover-check
 ```
 
+Infra enrichment + adaptive concurrency:
+
+```bash
+subflare -d hiddeninvestigations.net --enrich-infra --auto-tune
+```
+
 Takeover-only from file:
 
 ```bash
@@ -347,6 +360,12 @@ Combine list file + stdin in automation mode:
 
 ```bash
 subflare --stdin --strict-io --no-banner -l domain.txt
+```
+
+Update takeover fingerprints:
+
+```bash
+subflare --update-fingerprints
 ```
 
 Save text + JSONL:
@@ -376,6 +395,12 @@ subflare monitor -d hiddeninvestigations.net \
   --webhook-discord 'https://discord.com/api/webhooks/...'
 ```
 
+Monitor pipelines with only-new stdout:
+
+```bash
+subflare monitor -d hiddeninvestigations.net --only-new --strict-io
+```
+
 ---
 
 ## Takeover Check Behavior
@@ -397,6 +422,10 @@ Current built-in provider rules include:
 - Vercel
 - Surge
 
+`--update-fingerprints` refreshes the local fingerprint pack at:
+
+`~/.config/subflare/takeover-fingerprints.json`
+
 Scan summary now reports:
 
 - `takeover checked`: how many hosts were evaluated for takeover signals.
@@ -404,7 +433,7 @@ Scan summary now reports:
 
 When `--takeover-check` is enabled, terminal output also prints a dedicated **Takeover Assessment** section:
 
-- Lists only hosts with takeover possibility signals (`[TAKEOVER] ...`)
+- Lists only hosts with takeover possibility signals (`[TAKEOVER][HIGH|MEDIUM|LOW] ...`)
 - Prints a clear no-findings message (`no luck`) when no takeover possibility is detected
 - Does not change the normal subdomain host result output format
 
@@ -424,6 +453,8 @@ When `--jsonl` is used, each line contains one validated record with fields such
 - `sources`, `source_count`, `duplicates_merged`
 - `confidence`, `first_seen`
 - `a` (A records), `cname`
+- `infra_asn`, `infra_org`, `infra_cdn`
+- `takeover_confidence`
 - `validated`
 
 ---

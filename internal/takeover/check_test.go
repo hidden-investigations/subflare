@@ -85,3 +85,18 @@ func TestMatchesHTTPFingerprint(t *testing.T) {
 		t.Fatal("did not expect match without indicator")
 	}
 }
+
+func TestConfidenceFromHTTP(t *testing.T) {
+	matchWithStatus := takeoverMatch{Statuses: []int{404}}
+	if got := confidenceFromHTTP(404, matchWithStatus); got != "medium" {
+		t.Fatalf("unexpected confidence: %s", got)
+	}
+	if got := confidenceFromHTTP(0, matchWithStatus); got != "low" {
+		t.Fatalf("unexpected confidence for unknown status: %s", got)
+	}
+
+	matchNoStatus := takeoverMatch{}
+	if got := confidenceFromHTTP(0, matchNoStatus); got != "medium" {
+		t.Fatalf("unexpected confidence for no-status rule: %s", got)
+	}
+}

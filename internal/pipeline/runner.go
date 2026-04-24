@@ -12,6 +12,7 @@ import (
 	"github.com/hidden-investigations/subflare/internal/dnsresolve"
 	"github.com/hidden-investigations/subflare/internal/enum"
 	"github.com/hidden-investigations/subflare/internal/httpprobe"
+	"github.com/hidden-investigations/subflare/internal/infra"
 	"github.com/hidden-investigations/subflare/internal/model"
 	"github.com/hidden-investigations/subflare/internal/options"
 	"github.com/hidden-investigations/subflare/internal/provider"
@@ -46,6 +47,9 @@ type Stats struct {
 	RDNSResolved      int
 	WildcardDropped   int
 	TrustedDropped    int
+	AutoTuneEnabled   bool
+	InfraEnabled      bool
+	InfraEnriched     int
 	HTTPProbeEnabled  bool
 	HTTPProbed        int
 	TakeoverEnabled   bool
@@ -59,6 +63,8 @@ func Run(ctx context.Context, opts options.Options) (Report, error) {
 	report.Stats.SourceCounts = map[string]int{}
 	report.Stats.SourceCacheHits = map[string]int{}
 	report.Stats.SourceErrors = map[string]string{}
+	report.Stats.AutoTuneEnabled = opts.AutoTune
+	report.Stats.InfraEnabled = opts.EnrichInfra
 	report.Stats.HTTPProbeEnabled = opts.HTTPProbe
 	report.Stats.TakeoverEnabled = opts.TakeoverCheck
 	candidateMap := map[string]model.Candidate{}
@@ -159,9 +165,13 @@ func Run(ctx context.Context, opts options.Options) (Report, error) {
 
 	fastResolver := dnsresolve.New(opts.Resolvers, opts.Timeout, opts.Retries)
 	report.Stats.DNSBackend = opts.DNSBackend
+	resolveThreads := opts.Threads
+	if opts.AutoTune {
+		resolveThreads = tuneConcurrencyByVolume(opts.Threads, len(candidates))
+	}
 	resolved, failed, resolveErr := dnsresolve.ResolveCandidatesWithBackend(ctx, candidates, fastResolver, dnsresolve.BackendConfig{
 		Backend:     opts.DNSBackend,
-		Threads:     opts.Threads,
+		Threads:     resolveThreads,
 		MassDNSPath: opts.MassDNSPath,
 	})
 	if resolveErr != nil {
@@ -179,7 +189,7 @@ func Run(ctx context.Context, opts options.Options) (Report, error) {
 		if len(expanded) > 0 {
 			rdnsResolved, _, rdnsErr := dnsresolve.ResolveCandidatesWithBackend(ctx, expanded, fastResolver, dnsresolve.BackendConfig{
 				Backend:     opts.DNSBackend,
-				Threads:     opts.Threads,
+				Threads:     resolveThreads,
 				MassDNSPath: opts.MassDNSPath,
 			})
 			if rdnsErr == nil && len(rdnsResolved) > 0 {
@@ -197,14 +207,33 @@ func Run(ctx context.Context, opts options.Options) (Report, error) {
 		return report, nil
 	}
 
-	validated, trustedDropped := dnsresolve.ValidateResults(ctx, clean, trustedResolver, opts.Threads)
+	validateThreads := opts.Threads
+	if opts.AutoTune {
+		validateThreads = tuneConcurrencyByFailureRate(opts.Threads, report.Stats.FailedFast, report.Stats.ResolvedFast+report.Stats.FailedFast)
+	}
+	validated, trustedDropped := dnsresolve.ValidateResults(ctx, clean, trustedResolver, validateThreads)
 	report.Stats.TrustedDropped = trustedDropped
 
 	if opts.HTTPProbe {
-		validated, report.Stats.HTTPProbed = httpprobe.ProbeResults(ctx, validated, opts.HTTPProbeThreads, opts.HTTPProbeTimeout)
+		probeThreads := opts.HTTPProbeThreads
+		if opts.AutoTune {
+			probeThreads = tuneConcurrencyByFailureRate(opts.HTTPProbeThreads, trustedDropped, len(clean))
+		}
+		validated, report.Stats.HTTPProbed = httpprobe.ProbeResults(ctx, validated, probeThreads, opts.HTTPProbeTimeout)
 	}
 	if opts.TakeoverCheck {
-		validated, report.Stats.TakeoverChecked, report.Stats.TakeoverSignals = takeover.CheckResults(ctx, validated, trustedResolver, opts.TakeoverTimeout, opts.TakeoverThreads)
+		takeoverThreads := opts.TakeoverThreads
+		if opts.AutoTune {
+			takeoverThreads = tuneConcurrencyByFailureRate(opts.TakeoverThreads, trustedDropped, len(clean))
+		}
+		validated, report.Stats.TakeoverChecked, report.Stats.TakeoverSignals = takeover.CheckResults(ctx, validated, trustedResolver, opts.TakeoverTimeout, takeoverThreads)
+	}
+	if opts.EnrichInfra {
+		enrichThreads := validateThreads
+		if enrichThreads < 8 {
+			enrichThreads = 8
+		}
+		validated, report.Stats.InfraEnriched = infra.EnrichResults(ctx, validated, opts.TrustedResolvers, opts.Timeout, enrichThreads)
 	}
 
 	for i := range validated {
@@ -223,6 +252,56 @@ func Run(ctx context.Context, opts options.Options) (Report, error) {
 	report.Stats.FinalTotal = len(validated)
 
 	return report, nil
+}
+
+func tuneConcurrencyByFailureRate(base, failed, total int) int {
+	if base < 1 {
+		base = 1
+	}
+	if total < 1 {
+		return base
+	}
+	failureRate := float64(failed) / float64(total)
+	switch {
+	case failureRate >= 0.70:
+		return maxInt(base/3, 8)
+	case failureRate >= 0.50:
+		return maxInt(base/2, 12)
+	case failureRate >= 0.30:
+		return maxInt((base*7)/10, 16)
+	case failureRate <= 0.05 && total >= 200:
+		return minInt((base*12)/10, base+64)
+	case failureRate <= 0.15 && total >= 100:
+		return minInt((base*11)/10, base+32)
+	default:
+		return base
+	}
+}
+
+func tuneConcurrencyByVolume(base, total int) int {
+	if base < 1 {
+		base = 1
+	}
+	if total <= 0 {
+		return base
+	}
+	if total < base/2 {
+		return minInt(base, maxInt(total, 16))
+	}
+	if total > 5000 {
+		return minInt(base+64, 512)
+	}
+	if total > 2000 {
+		return minInt(base+32, 400)
+	}
+	return base
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func mergeCandidates(dst map[string]model.Candidate, items []model.Candidate) {

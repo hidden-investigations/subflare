@@ -29,16 +29,16 @@ func TestNormalizeDiffShowMode(t *testing.T) {
 
 func TestCollectTakeoverFindings(t *testing.T) {
 	results := []model.Result{
-		{Host: "b.example.com", TakeoverPotential: true, TakeoverProvider: "vercel", TakeoverReason: "fingerprint"},
-		{Host: "a.example.com", TakeoverPotential: true, TakeoverProvider: "github-pages", TakeoverReason: "dangling"},
-		{Host: "a.example.com", TakeoverPotential: true, TakeoverProvider: "github-pages", TakeoverReason: "duplicate"},
+		{Host: "b.example.com", TakeoverPotential: true, TakeoverProvider: "vercel", TakeoverReason: "fingerprint", TakeoverConfidence: "medium"},
+		{Host: "a.example.com", TakeoverPotential: true, TakeoverProvider: "github-pages", TakeoverReason: "fingerprint", TakeoverConfidence: "medium"},
+		{Host: "a.example.com", TakeoverPotential: true, TakeoverProvider: "github-pages", TakeoverReason: "dangling", TakeoverConfidence: "high"},
 		{Host: "c.example.com", TakeoverPotential: false},
 	}
 
 	got := collectTakeoverFindings(results)
 	want := []takeoverFinding{
-		{Host: "a.example.com", Provider: "github-pages", Reason: "dangling"},
-		{Host: "b.example.com", Provider: "vercel", Reason: "fingerprint"},
+		{Host: "a.example.com", Provider: "github-pages", Reason: "dangling", Confidence: "high"},
+		{Host: "b.example.com", Provider: "vercel", Reason: "fingerprint", Confidence: "medium"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected findings\n got: %#v\nwant: %#v", got, want)
